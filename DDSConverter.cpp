@@ -4,6 +4,7 @@
 #include "framework.h"
 #include "DDSConverter.h"
 
+
 #define MAX_LOADSTRING 100
 
 // 전역 변수:
