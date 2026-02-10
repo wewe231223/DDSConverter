@@ -10,6 +10,7 @@
 
 #pragma comment(lib, "d3d12.lib")
 #pragma comment(lib, "dxgi.lib")
+#pragma comment(lib, "DirectXTex.lib")
 
 #define MAX_LOADSTRING 100
 

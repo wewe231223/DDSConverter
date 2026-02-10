@@ -1,4 +1,4 @@
-#include "framework.h"
+﻿#include "framework.h"
 #include "Dx12ImguiRenderer.h"
 
 #include "imgui.h"
@@ -118,6 +118,13 @@ bool Dx12ImguiRenderer::LoadDroppedImage(const std::wstring& FilePath) {
 	if (!mInitialized) {
 		return false;
 	}
+
+	auto res = mDroppedImageLoader.LoadImageFile(FilePath);
+
+	if (not res) {
+		MessageBox(nullptr, L"Failed To Load", L"Error", MB_OK | MB_ICONERROR);
+	}
+
 	return mDroppedImageLoader.LoadImageFile(FilePath);
 }
 
@@ -244,7 +251,8 @@ void Dx12ImguiRenderer::RenderImagePanel() {
 	ImGui::Text("DDS Converter");
 	ImGui::Text("Width: %u", mRenderWidth);
 	ImGui::Text("Height: %u", mRenderHeight);
-	ImGui::Text("이미지를 창에 드롭하세요");
+	ImGui::Text("Drop Image Here");
+
 	if (mDroppedImageLoader.HasImage()) {
 		const UINT ImageWidth { mDroppedImageLoader.GetWidth() };
 		const UINT ImageHeight { mDroppedImageLoader.GetHeight() };
