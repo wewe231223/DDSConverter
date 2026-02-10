@@ -5,6 +5,10 @@
 
 #include "Dx12ImguiRenderer.h"
 
+
+#pragma comment(lib, "d3d12.lib")
+#pragma comment(lib, "dxgi.lib")
+
 #define MAX_LOADSTRING 100
 
 HINSTANCE GlobalInstanceHandle {};

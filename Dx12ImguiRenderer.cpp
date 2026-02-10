@@ -3,12 +3,9 @@
 
 #include <stdexcept>
 
-#include "External/ImGui/imgui.h"
-#include "External/ImGui/imgui_impl_dx12.h"
-#include "External/ImGui/imgui_impl_win32.h"
-
-#pragma comment(lib, "d3d12.lib")
-#pragma comment(lib, "dxgi.lib")
+#include "imgui.h"
+#include "imgui_impl_dx12.h"
+#include "imgui_impl_win32.h"
 
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND WindowHandle, UINT Message, WPARAM WParam, LPARAM LParam);
 
@@ -47,18 +44,8 @@ bool Dx12ImguiRenderer::Initialize(HWND WindowHandle) {
 	if (!ImGui_ImplWin32_Init(mWindowHandle)) {
 		return false;
 	}
-	ImGui_ImplDX12_InitInfo InitInfo {};
-	InitInfo.Device = mDevice.Get();
-	InitInfo.CommandQueue = mCommandQueue.Get();
-	InitInfo.NumFramesInFlight = FrameCount;
-	InitInfo.RTVFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
-	InitInfo.DSVFormat = DXGI_FORMAT_UNKNOWN;
-	InitInfo.SrvDescriptorHeap = mSrvHeap.Get();
-	InitInfo.SrvDescriptorAllocFn = nullptr;
-	InitInfo.SrvDescriptorFreeFn = nullptr;
-	InitInfo.LegacySingleSrvCpuDescriptor = mSrvHeap->GetCPUDescriptorHandleForHeapStart();
-	InitInfo.LegacySingleSrvGpuDescriptor = mSrvHeap->GetGPUDescriptorHandleForHeapStart();
-	if (!ImGui_ImplDX12_Init(&InitInfo)) {
+	
+	if (!ImGui_ImplDX12_Init(mDevice.Get(), FrameCount, DXGI_FORMAT_R8G8B8A8_UNORM, mSrvHeap.Get(), mSrvHeap->GetCPUDescriptorHandleForHeapStart(), mSrvHeap->GetGPUDescriptorHandleForHeapStart())) {
 		return false;
 	}
 	mInitialized = true;
