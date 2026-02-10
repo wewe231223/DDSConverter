@@ -48,6 +48,7 @@ private:
 	UINT64 mFenceValue;
 	HANDLE mFenceEvent;
 	bool mInitialized;
+	std::wstring mImageStatusMessage;
 	DroppedImageLoader mDroppedImageLoader;
 	Microsoft::WRL::ComPtr<IDXGIFactory4> mFactory;
 	Microsoft::WRL::ComPtr<ID3D12Device> mDevice;

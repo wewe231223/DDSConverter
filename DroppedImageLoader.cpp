@@ -18,6 +18,8 @@ DroppedImageLoader::DroppedImageLoader()
 	, mHasImage			{ false }
 	, mWidth			{ 0 }
 	, mHeight			{ 0 }
+	, mFilePath			{ }
+	, mLastErrorMessage	{ }
 	, mTextureId		{ nullptr } {
 }
 
@@ -30,6 +32,7 @@ bool DroppedImageLoader::Initialize(ID3D12Device* Device, ID3D12CommandQueue* Co
 		return true;
 	}
 	if (Device == nullptr || CommandQueue == nullptr || SrvHeap == nullptr || SrvDescriptorSize == 0) {
+		mLastErrorMessage = L"DirectX12 초기화 파라미터가 올바르지 않습니다.";
 		return false;
 	}
 	mDevice = Device;
@@ -42,6 +45,9 @@ bool DroppedImageLoader::Initialize(ID3D12Device* Device, ID3D12CommandQueue* Co
 	mCommandList->Close();
 	CreateSynchronizationObjects();
 	mInitialized = mFenceEvent != nullptr;
+	if (!mInitialized) {
+		mLastErrorMessage = L"동기화 객체 생성에 실패했습니다.";
+	}
 	return mInitialized;
 }
 
@@ -61,6 +67,7 @@ void DroppedImageLoader::Shutdown() {
 	}
 	mTextureId = nullptr;
 	mFilePath.clear();
+	mLastErrorMessage.clear();
 	mWidth = 0;
 	mHeight = 0;
 	mHasImage = false;
@@ -75,16 +82,29 @@ void DroppedImageLoader::Shutdown() {
 
 bool DroppedImageLoader::LoadImageFile(const std::wstring& FilePath) {
 	if (!mInitialized) {
+		mLastErrorMessage = L"이미지 로더가 초기화되지 않았습니다.";
 		return false;
 	}
-	if (!LoadScratchImage(FilePath)) {
+	if (!LoadAndConvertToDdsInMemory(FilePath)) {
+		mHasImage = false;
+		mTextureId = nullptr;
+		mFilePath.clear();
+		mWidth = 0;
+		mHeight = 0;
 		return false;
 	}
 	if (!CreateTextureFromScratchImage()) {
+		mHasImage = false;
+		mTextureId = nullptr;
+		mFilePath.clear();
+		mWidth = 0;
+		mHeight = 0;
+		mLastErrorMessage = L"DDS 텍스처 SRV 생성에 실패했습니다.";
 		return false;
 	}
 	mFilePath = FilePath;
 	mHasImage = true;
+	mLastErrorMessage.clear();
 	return true;
 }
 
@@ -108,6 +128,10 @@ std::wstring DroppedImageLoader::GetFilePath() const {
 	return mFilePath;
 }
 
+std::wstring DroppedImageLoader::GetLastErrorMessage() const {
+	return mLastErrorMessage;
+}
+
 void DroppedImageLoader::CreateSynchronizationObjects() {
 	mDevice->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&mFence));
 	mFenceValue = 1;
@@ -124,19 +148,58 @@ void DroppedImageLoader::WaitForGpu() {
 	}
 }
 
-bool DroppedImageLoader::LoadScratchImage(const std::wstring& FilePath) {
+bool DroppedImageLoader::DecodeFileToScratchImage(const std::wstring& FilePath, DirectX::ScratchImage& ScratchImage, std::wstring& ErrorMessage) const {
 	DirectX::TexMetadata Metadata {};
-	DirectX::ScratchImage ScratchImage {};
-	HRESULT LoadResult { DirectX::LoadFromWICFile(FilePath.c_str(), DirectX::WIC_FLAGS_FORCE_RGB, &Metadata, ScratchImage) };
-	if (FAILED(LoadResult)) {
-		LoadResult = DirectX::LoadFromDDSFile(FilePath.c_str(), DirectX::DDS_FLAGS_FORCE_RGB, &Metadata, ScratchImage);
+	HRESULT LoadResult { DirectX::LoadFromWICFile(FilePath.c_str(), DirectX::WIC_FLAGS_NONE, &Metadata, ScratchImage) };
+	if (SUCCEEDED(LoadResult)) {
+		return true;
 	}
-	if (FAILED(LoadResult)) {
+	LoadResult = DirectX::LoadFromDDSFile(FilePath.c_str(), DirectX::DDS_FLAGS_NONE, &Metadata, ScratchImage);
+	if (SUCCEEDED(LoadResult)) {
+		return true;
+	}
+	LoadResult = DirectX::LoadFromTGAFile(FilePath.c_str(), &Metadata, ScratchImage);
+	if (SUCCEEDED(LoadResult)) {
+		return true;
+	}
+	LoadResult = DirectX::LoadFromHDRFile(FilePath.c_str(), &Metadata, ScratchImage);
+	if (SUCCEEDED(LoadResult)) {
+		return true;
+	}
+	ErrorMessage = L"지원하지 않는 이미지 형식이거나 디코딩에 실패했습니다.";
+	return false;
+}
+
+bool DroppedImageLoader::LoadAndConvertToDdsInMemory(const std::wstring& FilePath) {
+	DirectX::ScratchImage DecodedImage {};
+	std::wstring DecodeErrorMessage {};
+	if (!DecodeFileToScratchImage(FilePath, DecodedImage, DecodeErrorMessage)) {
+		mLastErrorMessage = DecodeErrorMessage;
+		return false;
+	}
+	const DirectX::TexMetadata DecodedMetadata { DecodedImage.GetMetadata() };
+	DirectX::Blob DdsBlob {};
+	HRESULT SaveResult { DirectX::SaveToDDSMemory(DecodedImage.GetImages(), DecodedImage.GetImageCount(), DecodedMetadata, DirectX::DDS_FLAGS_NONE, DdsBlob) };
+	if (FAILED(SaveResult)) {
+		mLastErrorMessage = L"메모리 내 DDS 변환에 실패했습니다.";
+		return false;
+	}
+	DirectX::TexMetadata DdsMetadata {};
+	DirectX::ScratchImage DdsImage {};
+	HRESULT DdsLoadResult { DirectX::LoadFromDDSMemory(DdsBlob.GetBufferPointer(), DdsBlob.GetBufferSize(), DirectX::DDS_FLAGS_NONE, &DdsMetadata, DdsImage) };
+	if (FAILED(DdsLoadResult)) {
+		mLastErrorMessage = L"메모리 내 DDS 데이터를 다시 읽지 못했습니다.";
 		return false;
 	}
 	DirectX::ScratchImage ConvertedImage {};
-	HRESULT ConvertResult { DirectX::Convert(*ScratchImage.GetImage(0, 0, 0), DXGI_FORMAT_R8G8B8A8_UNORM, DirectX::TEX_FILTER_DEFAULT, DirectX::TEX_THRESHOLD_DEFAULT, ConvertedImage) };
+	const DirectX::Image* DdsBaseImage { DdsImage.GetImage(0, 0, 0) };
+	if (DdsBaseImage == nullptr) {
+		mLastErrorMessage = L"DDS 기본 이미지 데이터를 찾지 못했습니다.";
+		return false;
+	}
+	HRESULT ConvertResult { DirectX::Convert(*DdsBaseImage, DXGI_FORMAT_R8G8B8A8_UNORM, DirectX::TEX_FILTER_DEFAULT, DirectX::TEX_THRESHOLD_DEFAULT, ConvertedImage) };
 	if (FAILED(ConvertResult)) {
+		mLastErrorMessage = L"DDS 이미지를 렌더링 가능한 포맷으로 변환하지 못했습니다.";
 		return false;
 	}
 	mStagingResource.Reset();
@@ -146,6 +209,7 @@ bool DroppedImageLoader::LoadScratchImage(const std::wstring& FilePath) {
 	mHeight = static_cast<UINT>(ConvertedImage.GetMetadata().height);
 	const DirectX::Image* ImageData { ConvertedImage.GetImage(0, 0, 0) };
 	if (ImageData == nullptr) {
+		mLastErrorMessage = L"변환된 이미지 데이터를 찾지 못했습니다.";
 		return false;
 	}
 	D3D12_RESOURCE_DESC TextureDesc {};
@@ -201,22 +265,22 @@ bool DroppedImageLoader::LoadScratchImage(const std::wstring& FilePath) {
 	mUploadResource->Map(0, &ReadRange, &MappedData);
 	unsigned char* DestBytes { static_cast<unsigned char*>(MappedData) };
 	for (UINT RowIndex { 0 }; RowIndex < NumRows; ++RowIndex) {
-		const SIZE_T SrcOffset { static_cast<SIZE_T>(RowIndex) * ImageData->rowPitch };
-		const SIZE_T DstOffset { static_cast<SIZE_T>(RowIndex) * Footprint.Footprint.RowPitch };
-		memcpy(DestBytes + DstOffset, RawPixels.data() + SrcOffset, ImageData->rowPitch);
+		const SIZE_T SourceOffset { static_cast<SIZE_T>(RowIndex) * ImageData->rowPitch };
+		const SIZE_T DestinationOffset { static_cast<SIZE_T>(RowIndex) * Footprint.Footprint.RowPitch };
+		memcpy(DestBytes + DestinationOffset, RawPixels.data() + SourceOffset, ImageData->rowPitch);
 	}
 	mUploadResource->Unmap(0, nullptr);
 	mCommandAllocator->Reset();
 	mCommandList->Reset(mCommandAllocator.Get(), nullptr);
-	D3D12_TEXTURE_COPY_LOCATION DstLocation {};
-	DstLocation.pResource = mTextureResource.Get();
-	DstLocation.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-	DstLocation.SubresourceIndex = 0;
-	D3D12_TEXTURE_COPY_LOCATION SrcLocation {};
-	SrcLocation.pResource = mUploadResource.Get();
-	SrcLocation.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-	SrcLocation.PlacedFootprint = Footprint;
-	mCommandList->CopyTextureRegion(&DstLocation, 0, 0, 0, &SrcLocation, nullptr);
+	D3D12_TEXTURE_COPY_LOCATION DestinationLocation {};
+	DestinationLocation.pResource = mTextureResource.Get();
+	DestinationLocation.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+	DestinationLocation.SubresourceIndex = 0;
+	D3D12_TEXTURE_COPY_LOCATION SourceLocation {};
+	SourceLocation.pResource = mUploadResource.Get();
+	SourceLocation.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+	SourceLocation.PlacedFootprint = Footprint;
+	mCommandList->CopyTextureRegion(&DestinationLocation, 0, 0, 0, &SourceLocation, nullptr);
 	D3D12_RESOURCE_BARRIER Barrier {};
 	Barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
 	Barrier.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
