@@ -3,11 +3,14 @@
 
 #include <memory>
 
+#include <shellapi.h>
+
 #include "Dx12ImguiRenderer.h"
 
 
 #pragma comment(lib, "d3d12.lib")
 #pragma comment(lib, "dxgi.lib")
+#pragma comment(lib, "DirectXTex.lib")
 
 #define MAX_LOADSTRING 100
 
@@ -80,6 +83,7 @@ LRESULT CALLBACK WndProc(HWND WindowHandle, UINT Message, WPARAM WParam, LPARAM 
 	case WM_CREATE:
 		GlobalRenderer = std::make_unique<Dx12ImguiRenderer>();
 		GlobalRenderer->Initialize(WindowHandle);
+		DragAcceptFiles(WindowHandle, TRUE);
 		return 0;
 	case WM_SIZE:
 		if (GlobalRenderer != nullptr && WParam != SIZE_MINIMIZED) {
@@ -99,6 +103,15 @@ LRESULT CALLBACK WndProc(HWND WindowHandle, UINT Message, WPARAM WParam, LPARAM 
 			return DefWindowProc(WindowHandle, Message, WParam, LParam);
 		}
 	}
+	case WM_DROPFILES: {
+		HDROP DropHandle { reinterpret_cast<HDROP>(WParam) };
+		WCHAR FilePath[MAX_PATH] {};
+		if (DragQueryFile(DropHandle, 0, FilePath, MAX_PATH) > 0 && GlobalRenderer != nullptr) {
+			GlobalRenderer->LoadDroppedImage(FilePath);
+		}
+		DragFinish(DropHandle);
+		return 0;
+	}
 	case WM_PAINT: {
 		PAINTSTRUCT PaintStruct {};
 		BeginPaint(WindowHandle, &PaintStruct);
@@ -110,6 +123,7 @@ LRESULT CALLBACK WndProc(HWND WindowHandle, UINT Message, WPARAM WParam, LPARAM 
 		return 0;
 	}
 	case WM_DESTROY:
+		DragAcceptFiles(WindowHandle, FALSE);
 		if (GlobalRenderer != nullptr) {
 			GlobalRenderer->Shutdown();
 			GlobalRenderer.reset();

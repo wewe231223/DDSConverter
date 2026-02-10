@@ -1,7 +1,5 @@
-#include "framework.h"
+﻿#include "framework.h"
 #include "Dx12ImguiRenderer.h"
-
-#include <stdexcept>
 
 #include "imgui.h"
 #include "imgui_impl_dx12.h"
@@ -10,14 +8,15 @@
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND WindowHandle, UINT Message, WPARAM WParam, LPARAM LParam);
 
 Dx12ImguiRenderer::Dx12ImguiRenderer()
-	: mWindowHandle		{ nullptr }
-	, mFrameIndex		{ 0 }
+	: mWindowHandle			{ nullptr }
+	, mFrameIndex			{ 0 }
 	, mRtvDescriptorSize	{ 0 }
-	, mRenderWidth		{ 0 }
-	, mRenderHeight		{ 0 }
-	, mFenceValue		{ 0 }
-	, mFenceEvent		{ nullptr }
-	, mInitialized		{ false } {
+	, mSrvDescriptorSize	{ 0 }
+	, mRenderWidth			{ 0 }
+	, mRenderHeight			{ 0 }
+	, mFenceValue			{ 0 }
+	, mFenceEvent			{ nullptr }
+	, mInitialized			{ false } {
 }
 
 Dx12ImguiRenderer::~Dx12ImguiRenderer() {
@@ -44,8 +43,10 @@ bool Dx12ImguiRenderer::Initialize(HWND WindowHandle) {
 	if (!ImGui_ImplWin32_Init(mWindowHandle)) {
 		return false;
 	}
-	
 	if (!ImGui_ImplDX12_Init(mDevice.Get(), FrameCount, DXGI_FORMAT_R8G8B8A8_UNORM, mSrvHeap.Get(), mSrvHeap->GetCPUDescriptorHandleForHeapStart(), mSrvHeap->GetGPUDescriptorHandleForHeapStart())) {
+		return false;
+	}
+	if (!mDroppedImageLoader.Initialize(mDevice.Get(), mCommandQueue.Get(), mSrvHeap.Get(), mSrvDescriptorSize, ImageSrvDescriptorIndex)) {
 		return false;
 	}
 	mInitialized = true;
@@ -58,6 +59,7 @@ void Dx12ImguiRenderer::Shutdown() {
 	}
 	if (mInitialized) {
 		WaitForGpu();
+		mDroppedImageLoader.Shutdown();
 		ImGui_ImplDX12_Shutdown();
 		ImGui_ImplWin32_Shutdown();
 		ImGui::DestroyContext();
@@ -103,17 +105,27 @@ void Dx12ImguiRenderer::Render() {
 	ImGui_ImplDX12_NewFrame();
 	ImGui_ImplWin32_NewFrame();
 	ImGui::NewFrame();
-	ImGui::Begin("DirectX12 ImGui Renderer");
-	ImGui::Text("DDS Converter");
-	ImGui::Text("Width: %u", mRenderWidth);
-	ImGui::Text("Height: %u", mRenderHeight);
-	ImGui::End();
+	RenderImagePanel();
 	ImGui::Render();
 	RecordCommandList();
 	ID3D12CommandList* CommandLists[] { mCommandList.Get() };
 	mCommandQueue->ExecuteCommandLists(1, CommandLists);
 	mSwapChain->Present(1, 0);
 	MoveToNextFrame();
+}
+
+bool Dx12ImguiRenderer::LoadDroppedImage(const std::wstring& FilePath) {
+	if (!mInitialized) {
+		return false;
+	}
+
+	auto res = mDroppedImageLoader.LoadImageFile(FilePath);
+
+	if (not res) {
+		MessageBox(nullptr, L"Failed To Load", L"Error", MB_OK | MB_ICONERROR);
+	}
+
+	return mDroppedImageLoader.LoadImageFile(FilePath);
 }
 
 LRESULT Dx12ImguiRenderer::HandleWindowMessage(HWND WindowHandle, UINT Message, WPARAM WParam, LPARAM LParam) {
@@ -149,10 +161,11 @@ void Dx12ImguiRenderer::CreateDeviceResources() {
 	mDevice->CreateDescriptorHeap(&RtvHeapDesc, IID_PPV_ARGS(&mRtvHeap));
 	mRtvDescriptorSize = mDevice->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
 	D3D12_DESCRIPTOR_HEAP_DESC SrvHeapDesc {};
-	SrvHeapDesc.NumDescriptors = 1;
+	SrvHeapDesc.NumDescriptors = SrvDescriptorCount;
 	SrvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
 	SrvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
 	mDevice->CreateDescriptorHeap(&SrvHeapDesc, IID_PPV_ARGS(&mSrvHeap));
+	mSrvDescriptorSize = mDevice->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
 	for (UINT Index { 0 }; Index < FrameCount; ++Index) {
 		mDevice->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&mCommandAllocators[Index]));
 	}
@@ -231,6 +244,32 @@ void Dx12ImguiRenderer::RecordCommandList() {
 	ToPresentBarrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
 	mCommandList->ResourceBarrier(1, &ToPresentBarrier);
 	mCommandList->Close();
+}
+
+void Dx12ImguiRenderer::RenderImagePanel() {
+	ImGui::Begin("DirectX12 ImGui Renderer");
+	ImGui::Text("DDS Converter");
+	ImGui::Text("Width: %u", mRenderWidth);
+	ImGui::Text("Height: %u", mRenderHeight);
+	ImGui::Text("Drop Image Here");
+
+	if (mDroppedImageLoader.HasImage()) {
+		const UINT ImageWidth { mDroppedImageLoader.GetWidth() };
+		const UINT ImageHeight { mDroppedImageLoader.GetHeight() };
+		ImGui::Text("Image Width: %u", ImageWidth);
+		ImGui::Text("Image Height: %u", ImageHeight);
+		ImGui::Text("Path: %ls", mDroppedImageLoader.GetFilePath().c_str());
+		const float MaxDisplayWidth { 512.0F };
+		float DisplayWidth { static_cast<float>(ImageWidth) };
+		float DisplayHeight { static_cast<float>(ImageHeight) };
+		if (DisplayWidth > MaxDisplayWidth && DisplayWidth > 0.0F) {
+			const float Scale { MaxDisplayWidth / DisplayWidth };
+			DisplayWidth *= Scale;
+			DisplayHeight *= Scale;
+		}
+		ImGui::Image(mDroppedImageLoader.GetTextureId(), ImVec2(DisplayWidth, DisplayHeight));
+	}
+	ImGui::End();
 }
 
 bool Dx12ImguiRenderer::IsInitialized() const {
