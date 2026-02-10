@@ -8,6 +8,10 @@
 
 #include "imgui.h"
 
+namespace DirectX {
+	class ScratchImage;
+}
+
 class DroppedImageLoader {
 public:
 	DroppedImageLoader();
@@ -25,12 +29,14 @@ public:
 	UINT GetWidth() const;
 	UINT GetHeight() const;
 	std::wstring GetFilePath() const;
+	std::string GetLastErrorMessage() const;
 
 private:
 	void CreateSynchronizationObjects();
 	void WaitForGpu();
-	bool LoadScratchImage(const std::wstring& FilePath);
+	bool LoadAndConvertToDdsInMemory(const std::wstring& FilePath);
 	bool CreateTextureFromScratchImage();
+	bool DecodeFileToScratchImage(const std::wstring& FilePath, DirectX::ScratchImage& ScratchImage, std::string& ErrorMessage) const;
 	D3D12_CPU_DESCRIPTOR_HANDLE GetCpuHandle() const;
 	D3D12_GPU_DESCRIPTOR_HANDLE GetGpuHandle() const;
 
@@ -46,6 +52,7 @@ private:
 	UINT mWidth;
 	UINT mHeight;
 	std::wstring mFilePath;
+	std::string mLastErrorMessage;
 	ImTextureID mTextureId;
 	Microsoft::WRL::ComPtr<ID3D12CommandAllocator> mCommandAllocator;
 	Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> mCommandList;
