@@ -32,7 +32,7 @@ bool DroppedImageLoader::Initialize(ID3D12Device* Device, ID3D12CommandQueue* Co
 		return true;
 	}
 	if (Device == nullptr || CommandQueue == nullptr || SrvHeap == nullptr || SrvDescriptorSize == 0) {
-		mLastErrorMessage = L"DirectX12 초기화 파라미터가 올바르지 않습니다.";
+		mLastErrorMessage = "DirectX12 초기화 파라미터가 올바르지 않습니다.";
 		return false;
 	}
 	mDevice = Device;
@@ -46,7 +46,7 @@ bool DroppedImageLoader::Initialize(ID3D12Device* Device, ID3D12CommandQueue* Co
 	CreateSynchronizationObjects();
 	mInitialized = mFenceEvent != nullptr;
 	if (!mInitialized) {
-		mLastErrorMessage = L"동기화 객체 생성에 실패했습니다.";
+		mLastErrorMessage = "동기화 객체 생성에 실패했습니다.";
 	}
 	return mInitialized;
 }
@@ -82,7 +82,7 @@ void DroppedImageLoader::Shutdown() {
 
 bool DroppedImageLoader::LoadImageFile(const std::wstring& FilePath) {
 	if (!mInitialized) {
-		mLastErrorMessage = L"이미지 로더가 초기화되지 않았습니다.";
+		mLastErrorMessage = "이미지 로더가 초기화되지 않았습니다.";
 		return false;
 	}
 	if (!LoadAndConvertToDdsInMemory(FilePath)) {
@@ -99,7 +99,7 @@ bool DroppedImageLoader::LoadImageFile(const std::wstring& FilePath) {
 		mFilePath.clear();
 		mWidth = 0;
 		mHeight = 0;
-		mLastErrorMessage = L"DDS 텍스처 SRV 생성에 실패했습니다.";
+		mLastErrorMessage = "DDS 텍스처 SRV 생성에 실패했습니다.";
 		return false;
 	}
 	mFilePath = FilePath;
@@ -128,7 +128,7 @@ std::wstring DroppedImageLoader::GetFilePath() const {
 	return mFilePath;
 }
 
-std::wstring DroppedImageLoader::GetLastErrorMessage() const {
+std::string DroppedImageLoader::GetLastErrorMessage() const {
 	return mLastErrorMessage;
 }
 
@@ -148,7 +148,7 @@ void DroppedImageLoader::WaitForGpu() {
 	}
 }
 
-bool DroppedImageLoader::DecodeFileToScratchImage(const std::wstring& FilePath, DirectX::ScratchImage& ScratchImage, std::wstring& ErrorMessage) const {
+bool DroppedImageLoader::DecodeFileToScratchImage(const std::wstring& FilePath, DirectX::ScratchImage& ScratchImage, std::string& ErrorMessage) const {
 	DirectX::TexMetadata Metadata {};
 	HRESULT LoadResult { DirectX::LoadFromWICFile(FilePath.c_str(), DirectX::WIC_FLAGS_NONE, &Metadata, ScratchImage) };
 	if (SUCCEEDED(LoadResult)) {
@@ -166,13 +166,13 @@ bool DroppedImageLoader::DecodeFileToScratchImage(const std::wstring& FilePath, 
 	if (SUCCEEDED(LoadResult)) {
 		return true;
 	}
-	ErrorMessage = L"지원하지 않는 이미지 형식이거나 디코딩에 실패했습니다.";
+	ErrorMessage = "지원하지 않는 이미지 형식이거나 디코딩에 실패했습니다.";
 	return false;
 }
 
 bool DroppedImageLoader::LoadAndConvertToDdsInMemory(const std::wstring& FilePath) {
 	DirectX::ScratchImage DecodedImage {};
-	std::wstring DecodeErrorMessage {};
+	std::string DecodeErrorMessage {};
 	if (!DecodeFileToScratchImage(FilePath, DecodedImage, DecodeErrorMessage)) {
 		mLastErrorMessage = DecodeErrorMessage;
 		return false;
@@ -181,25 +181,28 @@ bool DroppedImageLoader::LoadAndConvertToDdsInMemory(const std::wstring& FilePat
 	DirectX::Blob DdsBlob {};
 	HRESULT SaveResult { DirectX::SaveToDDSMemory(DecodedImage.GetImages(), DecodedImage.GetImageCount(), DecodedMetadata, DirectX::DDS_FLAGS_NONE, DdsBlob) };
 	if (FAILED(SaveResult)) {
-		mLastErrorMessage = L"메모리 내 DDS 변환에 실패했습니다.";
+		mLastErrorMessage = "메모리 내 DDS 변환에 실패했습니다.";
 		return false;
 	}
 	DirectX::TexMetadata DdsMetadata {};
 	DirectX::ScratchImage DdsImage {};
 	HRESULT DdsLoadResult { DirectX::LoadFromDDSMemory(DdsBlob.GetBufferPointer(), DdsBlob.GetBufferSize(), DirectX::DDS_FLAGS_NONE, &DdsMetadata, DdsImage) };
 	if (FAILED(DdsLoadResult)) {
-		mLastErrorMessage = L"메모리 내 DDS 데이터를 다시 읽지 못했습니다.";
+		mLastErrorMessage = "메모리 내 DDS 데이터를 다시 읽지 못했습니다.";
 		return false;
 	}
 	DirectX::ScratchImage ConvertedImage {};
 	const DirectX::Image* DdsBaseImage { DdsImage.GetImage(0, 0, 0) };
 	if (DdsBaseImage == nullptr) {
-		mLastErrorMessage = L"DDS 기본 이미지 데이터를 찾지 못했습니다.";
+		mLastErrorMessage = "DDS 기본 이미지 데이터를 찾지 못했습니다.";
 		return false;
 	}
+
+	// 출력 포맷 문제
 	HRESULT ConvertResult { DirectX::Convert(*DdsBaseImage, DXGI_FORMAT_R8G8B8A8_UNORM, DirectX::TEX_FILTER_DEFAULT, DirectX::TEX_THRESHOLD_DEFAULT, ConvertedImage) };
 	if (FAILED(ConvertResult)) {
-		mLastErrorMessage = L"DDS 이미지를 렌더링 가능한 포맷으로 변환하지 못했습니다.";
+		mLastErrorMessage = "DDS 이미지를 렌더링 가능한 포맷으로 변환하지 못했습니다.";
+		mLastErrorMessage += "\n오류 코드: " + std::to_string(ConvertResult);
 		return false;
 	}
 	mStagingResource.Reset();
@@ -209,7 +212,7 @@ bool DroppedImageLoader::LoadAndConvertToDdsInMemory(const std::wstring& FilePat
 	mHeight = static_cast<UINT>(ConvertedImage.GetMetadata().height);
 	const DirectX::Image* ImageData { ConvertedImage.GetImage(0, 0, 0) };
 	if (ImageData == nullptr) {
-		mLastErrorMessage = L"변환된 이미지 데이터를 찾지 못했습니다.";
+		mLastErrorMessage = "변환된 이미지 데이터를 찾지 못했습니다.";
 		return false;
 	}
 	D3D12_RESOURCE_DESC TextureDesc {};

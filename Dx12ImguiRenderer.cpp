@@ -40,13 +40,35 @@ bool Dx12ImguiRenderer::Initialize(HWND WindowHandle) {
 	CreateDeviceResources();
 	IMGUI_CHECKVERSION();
 	ImGui::CreateContext();
+
+	// ImGui 초기화 (ImGui::CreateContext()) 직후에 배치하세요.
+	ImGuiIO& io = ImGui::GetIO();
+
+	// 1. 한글 폰트 설정
+	// 시스템 폰트 경로 (Windows 표준: malgun.ttf)
+	const char* fontPath = "C:\\Windows\\Fonts\\malgun.ttf";
+
+	// 2. 한글 글리프 범위 설정 (한글 + 기본 라틴 문자)
+	const ImWchar* koreanRange = io.Fonts->GetGlyphRangesKorean();
+
+	ImFontConfig fontConfig;
+	fontConfig.OversampleH = 2; // 가로 안티앨리어싱 강화
+	fontConfig.OversampleV = 2; // 세로 안티앨리어싱 강화
+	fontConfig.PixelSnapH = true;
+
+	ImFont* font = io.Fonts->AddFontFromFileTTF(fontPath, 18.0f, &fontConfig, koreanRange);
+
+	if (font == nullptr) {
+		io.Fonts->AddFontDefault();
+	}
+
 	ImGui::StyleColorsDark();
 	if (!ImGui_ImplWin32_Init(mWindowHandle)) {
-		mImageStatusMessage = L"ImGui Win32 초기화에 실패했습니다.";
+		mImageStatusMessage = "ImGui Win32 초기화에 실패했습니다.";
 		return false;
 	}
 	if (!ImGui_ImplDX12_Init(mDevice.Get(), FrameCount, DXGI_FORMAT_R8G8B8A8_UNORM, mSrvHeap.Get(), mSrvHeap->GetCPUDescriptorHandleForHeapStart(), mSrvHeap->GetGPUDescriptorHandleForHeapStart())) {
-		mImageStatusMessage = L"ImGui DX12 초기화에 실패했습니다.";
+		mImageStatusMessage = "ImGui DX12 초기화에 실패했습니다.";
 		return false;
 	}
 	if (!mDroppedImageLoader.Initialize(mDevice.Get(), mCommandQueue.Get(), mSrvHeap.Get(), mSrvDescriptorSize, ImageSrvDescriptorIndex)) {
@@ -54,7 +76,7 @@ bool Dx12ImguiRenderer::Initialize(HWND WindowHandle) {
 		return false;
 	}
 	mInitialized = true;
-	mImageStatusMessage = L"드롭된 이미지를 DDS 변환 후 표시합니다.";
+	mImageStatusMessage = "드롭된 이미지를 DDS 변환 후 표시합니다.";
 	return true;
 }
 
@@ -122,18 +144,18 @@ void Dx12ImguiRenderer::Render() {
 
 bool Dx12ImguiRenderer::LoadDroppedImage(const std::wstring& FilePath) {
 	if (!mInitialized) {
-		mImageStatusMessage = L"렌더러가 초기화되지 않아 이미지를 로드할 수 없습니다.";
+		mImageStatusMessage = "렌더러가 초기화되지 않아 이미지를 로드할 수 없습니다.";
 		return false;
 	}
 	const bool LoadResult { mDroppedImageLoader.LoadImageFile(FilePath) };
 	if (!LoadResult) {
 		mImageStatusMessage = mDroppedImageLoader.GetLastErrorMessage();
 		if (mImageStatusMessage.empty()) {
-			mImageStatusMessage = L"이미지 로드에 실패했습니다.";
+			mImageStatusMessage = "이미지 로드에 실패했습니다.";
 		}
 		return false;
 	}
-	mImageStatusMessage = L"DDS 변환 및 텍스처 업로드가 완료되었습니다.";
+	mImageStatusMessage = "DDS 변환 및 텍스처 업로드가 완료되었습니다.";
 	return true;
 }
 
@@ -262,7 +284,7 @@ void Dx12ImguiRenderer::RenderImagePanel() {
 	ImGui::Text("Height: %u", mRenderHeight);
 	ImGui::Text("Drop Image Here");
 	if (!mImageStatusMessage.empty()) {
-		ImGui::Text("Status: %ls", mImageStatusMessage.c_str());
+		ImGui::Text("Status: %s", mImageStatusMessage.c_str());
 	}
 	if (mDroppedImageLoader.HasImage()) {
 		const UINT ImageWidth { mDroppedImageLoader.GetWidth() };
