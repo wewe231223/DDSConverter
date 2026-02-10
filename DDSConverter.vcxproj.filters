@@ -27,9 +27,33 @@
     <ClInclude Include="DDSConverter.h">
       <Filter>헤더 파일</Filter>
     </ClInclude>
+    <ClInclude Include="Dx12ImguiRenderer.h">
+      <Filter>헤더 파일</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="DDSConverter.cpp">
+      <Filter>소스 파일</Filter>
+    </ClCompile>
+    <ClCompile Include="Dx12ImguiRenderer.cpp">
+      <Filter>소스 파일</Filter>
+    </ClCompile>
+    <ClCompile Include="External\ImGui\imgui.cpp">
+      <Filter>소스 파일</Filter>
+    </ClCompile>
+    <ClCompile Include="External\ImGui\imgui_draw.cpp">
+      <Filter>소스 파일</Filter>
+    </ClCompile>
+    <ClCompile Include="External\ImGui\imgui_tables.cpp">
+      <Filter>소스 파일</Filter>
+    </ClCompile>
+    <ClCompile Include="External\ImGui\imgui_widgets.cpp">
+      <Filter>소스 파일</Filter>
+    </ClCompile>
+    <ClCompile Include="External\ImGui\imgui_impl_dx12.cpp">
+      <Filter>소스 파일</Filter>
+    </ClCompile>
+    <ClCompile Include="External\ImGui\imgui_impl_win32.cpp">
       <Filter>소스 파일</Filter>
     </ClCompile>
   </ItemGroup>

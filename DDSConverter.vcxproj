@@ -138,12 +138,20 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClInclude Include="DDSConverter.h" />
+    <ClInclude Include="Dx12ImguiRenderer.h" />
     <ClInclude Include="framework.h" />
     <ClInclude Include="Resource.h" />
     <ClInclude Include="targetver.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="DDSConverter.cpp" />
+    <ClCompile Include="Dx12ImguiRenderer.cpp" />
+    <ClCompile Include="External\ImGui\imgui.cpp" />
+    <ClCompile Include="External\ImGui\imgui_draw.cpp" />
+    <ClCompile Include="External\ImGui\imgui_tables.cpp" />
+    <ClCompile Include="External\ImGui\imgui_widgets.cpp" />
+    <ClCompile Include="External\ImGui\imgui_impl_dx12.cpp" />
+    <ClCompile Include="External\ImGui\imgui_impl_win32.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="DDSConverter.rc" />
