@@ -7,27 +7,32 @@
 #include "DirectXTex.h"
 
 DroppedImageLoader::DroppedImageLoader()
-	: mDevice			{ nullptr }
-	, mCommandQueue		{ nullptr }
-	, mSrvHeap			{ nullptr }
-	, mSrvDescriptorSize	{ 0 }
-	, mDescriptorIndex	{ 0 }
-	, mFenceValue		{ 0 }
-	, mFenceEvent		{ nullptr }
-	, mInitialized		{ false }
-	, mHasImage			{ false }
-	, mWidth			{ 0 }
-	, mHeight			{ 0 }
-	, mFilePath			{ }
-	, mLastErrorMessage	{ }
-	, mTextureId		{ nullptr } {
+	: mDevice{ nullptr }
+	, mCommandQueue{ nullptr }
+	, mSrvHeap{ nullptr }
+	, mSrvDescriptorSize{ 0 }
+	, mSourceDescriptorIndex{ 0 }
+	, mConvertedDescriptorIndex{ 0 }
+	, mFenceValue{ 0 }
+	, mFenceEvent{ nullptr }
+	, mInitialized{ false }
+	, mHasImage{ false }
+	, mSourceWidth{ 0 }
+	, mSourceHeight{ 0 }
+	, mConvertedWidth{ 0 }
+	, mConvertedHeight{ 0 }
+	, mFilePath{}
+	, mLastErrorMessage{}
+	, mSourceTextureId{ nullptr }
+	, mConvertedTextureId{ nullptr }
+	, mOriginalScratchImage{} {
 }
 
 DroppedImageLoader::~DroppedImageLoader() {
 	Shutdown();
 }
 
-bool DroppedImageLoader::Initialize(ID3D12Device* Device, ID3D12CommandQueue* CommandQueue, ID3D12DescriptorHeap* SrvHeap, UINT SrvDescriptorSize, UINT DescriptorIndex) {
+bool DroppedImageLoader::Initialize(ID3D12Device* Device, ID3D12CommandQueue* CommandQueue, ID3D12DescriptorHeap* SrvHeap, UINT SrvDescriptorSize, UINT SourceDescriptorIndex, UINT ConvertedDescriptorIndex) {
 	if (mInitialized) {
 		return true;
 	}
@@ -39,7 +44,8 @@ bool DroppedImageLoader::Initialize(ID3D12Device* Device, ID3D12CommandQueue* Co
 	mCommandQueue = CommandQueue;
 	mSrvHeap = SrvHeap;
 	mSrvDescriptorSize = SrvDescriptorSize;
-	mDescriptorIndex = DescriptorIndex;
+	mSourceDescriptorIndex = SourceDescriptorIndex;
+	mConvertedDescriptorIndex = ConvertedDescriptorIndex;
 	mDevice->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&mCommandAllocator));
 	mDevice->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, mCommandAllocator.Get(), nullptr, IID_PPV_ARGS(&mCommandList));
 	mCommandList->Close();
@@ -55,9 +61,10 @@ void DroppedImageLoader::Shutdown() {
 	if (mCommandQueue != nullptr && mFence != nullptr && mFenceEvent != nullptr) {
 		WaitForGpu();
 	}
-	mTextureResource.Reset();
-	mUploadResource.Reset();
-	mStagingResource.Reset();
+	mSourceTextureResource.Reset();
+	mSourceUploadResource.Reset();
+	mConvertedTextureResource.Reset();
+	mConvertedUploadResource.Reset();
 	mFence.Reset();
 	mCommandList.Reset();
 	mCommandAllocator.Reset();
@@ -65,45 +72,75 @@ void DroppedImageLoader::Shutdown() {
 		CloseHandle(mFenceEvent);
 		mFenceEvent = nullptr;
 	}
-	mTextureId = nullptr;
+	mOriginalScratchImage.reset();
+	mSourceTextureId = nullptr;
+	mConvertedTextureId = nullptr;
 	mFilePath.clear();
 	mLastErrorMessage.clear();
-	mWidth = 0;
-	mHeight = 0;
+	mSourceWidth = 0;
+	mSourceHeight = 0;
+	mConvertedWidth = 0;
+	mConvertedHeight = 0;
 	mHasImage = false;
 	mInitialized = false;
 	mFenceValue = 0;
-	mDescriptorIndex = 0;
+	mSourceDescriptorIndex = 0;
+	mConvertedDescriptorIndex = 0;
 	mSrvDescriptorSize = 0;
 	mSrvHeap = nullptr;
 	mCommandQueue = nullptr;
 	mDevice = nullptr;
 }
 
-bool DroppedImageLoader::LoadImageFile(const std::wstring& FilePath) {
+bool DroppedImageLoader::LoadImageFile(const std::wstring& FilePath, const DdsConversionOptions& ConversionOptions) {
 	if (!mInitialized) {
 		mLastErrorMessage = "이미지 로더가 초기화되지 않았습니다.";
 		return false;
 	}
-	if (!LoadAndConvertToDdsInMemory(FilePath)) {
+	std::unique_ptr<DirectX::ScratchImage> DecodedImage{ std::make_unique<DirectX::ScratchImage>() };
+	std::string DecodeErrorMessage{};
+	if (!DecodeFileToScratchImage(FilePath, *DecodedImage, DecodeErrorMessage)) {
+		mLastErrorMessage = DecodeErrorMessage;
 		mHasImage = false;
-		mTextureId = nullptr;
-		mFilePath.clear();
-		mWidth = 0;
-		mHeight = 0;
 		return false;
 	}
-	if (!CreateTextureFromScratchImage()) {
-		mHasImage = false;
-		mTextureId = nullptr;
-		mFilePath.clear();
-		mWidth = 0;
-		mHeight = 0;
-		mLastErrorMessage = "DDS 텍스처 SRV 생성에 실패했습니다.";
-		return false;
-	}
+	mOriginalScratchImage = std::move(DecodedImage);
 	mFilePath = FilePath;
+	std::string UploadErrorMessage{};
+	if (!UploadTextureToDescriptor(*mOriginalScratchImage, mSourceDescriptorIndex, mSourceTextureResource, mSourceUploadResource, mSourceTextureId, mSourceWidth, mSourceHeight, UploadErrorMessage)) {
+		mLastErrorMessage = UploadErrorMessage;
+		mHasImage = false;
+		return false;
+	}
+	if (!RebuildConvertedImage(ConversionOptions)) {
+		mHasImage = false;
+		return false;
+	}
 	mHasImage = true;
+	mLastErrorMessage.clear();
+	return true;
+}
+
+bool DroppedImageLoader::RebuildConvertedImage(const DdsConversionOptions& ConversionOptions) {
+	if (!mInitialized) {
+		mLastErrorMessage = "이미지 로더가 초기화되지 않았습니다.";
+		return false;
+	}
+	if (mOriginalScratchImage == nullptr) {
+		mLastErrorMessage = "원본 이미지가 없어 DDS 변환을 수행할 수 없습니다.";
+		return false;
+	}
+	DirectX::ScratchImage ConvertedScratchImage{};
+	std::string BuildErrorMessage{};
+	if (!BuildConvertedScratchImage(ConversionOptions, ConvertedScratchImage, BuildErrorMessage)) {
+		mLastErrorMessage = BuildErrorMessage;
+		return false;
+	}
+	std::string UploadErrorMessage{};
+	if (!UploadTextureToDescriptor(ConvertedScratchImage, mConvertedDescriptorIndex, mConvertedTextureResource, mConvertedUploadResource, mConvertedTextureId, mConvertedWidth, mConvertedHeight, UploadErrorMessage)) {
+		mLastErrorMessage = UploadErrorMessage;
+		return false;
+	}
 	mLastErrorMessage.clear();
 	return true;
 }
@@ -112,16 +149,28 @@ bool DroppedImageLoader::HasImage() const {
 	return mHasImage;
 }
 
-ImTextureID DroppedImageLoader::GetTextureId() const {
-	return mTextureId;
+ImTextureID DroppedImageLoader::GetSourceTextureId() const {
+	return mSourceTextureId;
 }
 
-UINT DroppedImageLoader::GetWidth() const {
-	return mWidth;
+ImTextureID DroppedImageLoader::GetConvertedTextureId() const {
+	return mConvertedTextureId;
 }
 
-UINT DroppedImageLoader::GetHeight() const {
-	return mHeight;
+UINT DroppedImageLoader::GetSourceWidth() const {
+	return mSourceWidth;
+}
+
+UINT DroppedImageLoader::GetSourceHeight() const {
+	return mSourceHeight;
+}
+
+UINT DroppedImageLoader::GetConvertedWidth() const {
+	return mConvertedWidth;
+}
+
+UINT DroppedImageLoader::GetConvertedHeight() const {
+	return mConvertedHeight;
 }
 
 std::wstring DroppedImageLoader::GetFilePath() const {
@@ -139,7 +188,7 @@ void DroppedImageLoader::CreateSynchronizationObjects() {
 }
 
 void DroppedImageLoader::WaitForGpu() {
-	const UINT64 FenceToWaitFor { mFenceValue };
+	const UINT64 FenceToWaitFor{ mFenceValue };
 	mCommandQueue->Signal(mFence.Get(), FenceToWaitFor);
 	mFenceValue += 1;
 	if (mFence->GetCompletedValue() < FenceToWaitFor) {
@@ -149,8 +198,8 @@ void DroppedImageLoader::WaitForGpu() {
 }
 
 bool DroppedImageLoader::DecodeFileToScratchImage(const std::wstring& FilePath, DirectX::ScratchImage& ScratchImage, std::string& ErrorMessage) const {
-	DirectX::TexMetadata Metadata {};
-	HRESULT LoadResult { DirectX::LoadFromWICFile(FilePath.c_str(), DirectX::WIC_FLAGS_NONE, &Metadata, ScratchImage) };
+	DirectX::TexMetadata Metadata{};
+	HRESULT LoadResult{ DirectX::LoadFromWICFile(FilePath.c_str(), DirectX::WIC_FLAGS_NONE, &Metadata, ScratchImage) };
 	if (SUCCEEDED(LoadResult)) {
 		return true;
 	}
@@ -170,76 +219,143 @@ bool DroppedImageLoader::DecodeFileToScratchImage(const std::wstring& FilePath, 
 	return false;
 }
 
-bool DroppedImageLoader::LoadAndConvertToDdsInMemory(const std::wstring& FilePath) {
-	DirectX::ScratchImage DecodedImage {};
-	std::string DecodeErrorMessage {};
-	if (!DecodeFileToScratchImage(FilePath, DecodedImage, DecodeErrorMessage)) {
-		mLastErrorMessage = DecodeErrorMessage;
+bool DroppedImageLoader::BuildPreviewScratchImage(const DirectX::ScratchImage& SourceScratchImage, bool IsSrgbTarget, DirectX::ScratchImage& PreviewScratchImage, std::string& ErrorMessage) const {
+	const DirectX::TexMetadata SourceMetadata{ SourceScratchImage.GetMetadata() };
+	const DXGI_FORMAT PreviewFormat{ IsSrgbTarget ? DXGI_FORMAT_R8G8B8A8_UNORM_SRGB : DXGI_FORMAT_R8G8B8A8_UNORM };
+	if (SourceScratchImage.GetImageCount() == 0) {
+		ErrorMessage = "미리보기 이미지 데이터가 비어 있습니다.";
 		return false;
 	}
-	const DirectX::TexMetadata DecodedMetadata { DecodedImage.GetMetadata() };
-	DirectX::Blob DdsBlob {};
-	HRESULT SaveResult { DirectX::SaveToDDSMemory(DecodedImage.GetImages(), DecodedImage.GetImageCount(), DecodedMetadata, DirectX::DDS_FLAGS_NONE, DdsBlob) };
-	if (FAILED(SaveResult)) {
-		mLastErrorMessage = "메모리 내 DDS 변환에 실패했습니다.";
+	if (SourceMetadata.arraySize > 1 || SourceMetadata.depth > 1 || SourceMetadata.dimension != DirectX::TEX_DIMENSION_TEXTURE2D) {
+		const DirectX::Image* BaseImage{ SourceScratchImage.GetImage(0, 0, 0) };
+		if (BaseImage == nullptr) {
+			ErrorMessage = "미리보기용 기본 이미지를 찾지 못했습니다.";
+			return false;
+		}
+		HRESULT SingleConvertResult{ DirectX::Convert(*BaseImage, PreviewFormat, DirectX::TEX_FILTER_DEFAULT, DirectX::TEX_THRESHOLD_DEFAULT, PreviewScratchImage) };
+		if (FAILED(SingleConvertResult)) {
+			ErrorMessage = "미리보기 포맷 변환에 실패했습니다.";
+			return false;
+		}
+		return true;
+	}
+	HRESULT ConvertResult{ DirectX::Convert(SourceScratchImage.GetImages(), SourceScratchImage.GetImageCount(), SourceMetadata, PreviewFormat, DirectX::TEX_FILTER_DEFAULT, DirectX::TEX_THRESHOLD_DEFAULT, PreviewScratchImage) };
+	if (SUCCEEDED(ConvertResult)) {
+		return true;
+	}
+	const DirectX::Image* BaseImage{ SourceScratchImage.GetImage(0, 0, 0) };
+	if (BaseImage == nullptr) {
+		ErrorMessage = "미리보기용 기본 이미지를 찾지 못했습니다.";
 		return false;
 	}
-	DirectX::TexMetadata DdsMetadata {};
-	DirectX::ScratchImage DdsImage {};
-	HRESULT DdsLoadResult { DirectX::LoadFromDDSMemory(DdsBlob.GetBufferPointer(), DdsBlob.GetBufferSize(), DirectX::DDS_FLAGS_NONE, &DdsMetadata, DdsImage) };
-	if (FAILED(DdsLoadResult)) {
-		mLastErrorMessage = "메모리 내 DDS 데이터를 다시 읽지 못했습니다.";
+	HRESULT FallbackResult{ DirectX::Convert(*BaseImage, PreviewFormat, DirectX::TEX_FILTER_DEFAULT, DirectX::TEX_THRESHOLD_DEFAULT, PreviewScratchImage) };
+	if (FAILED(FallbackResult)) {
+		ErrorMessage = "미리보기 포맷 변환에 실패했습니다.";
 		return false;
 	}
-	DirectX::ScratchImage ConvertedImage {};
-	const DirectX::Image* DdsBaseImage { DdsImage.GetImage(0, 0, 0) };
-	if (DdsBaseImage == nullptr) {
-		mLastErrorMessage = "DDS 기본 이미지 데이터를 찾지 못했습니다.";
-		return false;
-	}
+	return true;
+}
 
-	// 출력 포맷 문제
-	HRESULT ConvertResult { DirectX::Convert(*DdsBaseImage, DXGI_FORMAT_R8G8B8A8_UNORM, DirectX::TEX_FILTER_DEFAULT, DirectX::TEX_THRESHOLD_DEFAULT, ConvertedImage) };
-	if (FAILED(ConvertResult)) {
-		mLastErrorMessage = "DDS 이미지를 렌더링 가능한 포맷으로 변환하지 못했습니다.";
-		mLastErrorMessage += "\n오류 코드: " + std::to_string(ConvertResult);
+bool DroppedImageLoader::BuildConvertedScratchImage(const DdsConversionOptions& ConversionOptions, DirectX::ScratchImage& ConvertedScratchImage, std::string& ErrorMessage) const {
+	const bool IsSrgbTarget{ ConversionOptions.OutputFormat == DdsOutputFormat::Rgba8UnormSrgb || ConversionOptions.OutputFormat == DdsOutputFormat::Bc1UnormSrgb || ConversionOptions.OutputFormat == DdsOutputFormat::Bc2UnormSrgb || ConversionOptions.OutputFormat == DdsOutputFormat::Bc3UnormSrgb || ConversionOptions.OutputFormat == DdsOutputFormat::Bc7UnormSrgb };
+	DirectX::ScratchImage PreviewSourceImage{};
+	if (!BuildPreviewScratchImage(*mOriginalScratchImage, IsSrgbTarget, PreviewSourceImage, ErrorMessage)) {
 		return false;
 	}
-	mStagingResource.Reset();
-	mUploadResource.Reset();
-	mTextureResource.Reset();
-	mWidth = static_cast<UINT>(ConvertedImage.GetMetadata().width);
-	mHeight = static_cast<UINT>(ConvertedImage.GetMetadata().height);
-	const DirectX::Image* ImageData { ConvertedImage.GetImage(0, 0, 0) };
+	DirectX::ScratchImage SourceForCompression{};
+	DirectX::TexMetadata SourceMetadata{ PreviewSourceImage.GetMetadata() };
+	if (ConversionOptions.GenerateMipMaps) {
+		HRESULT MipResult{ DirectX::GenerateMipMaps(PreviewSourceImage.GetImages(), PreviewSourceImage.GetImageCount(), SourceMetadata, DirectX::TEX_FILTER_DEFAULT, 0, SourceForCompression) };
+		if (FAILED(MipResult)) {
+			HRESULT FallbackInitResult{ SourceForCompression.InitializeFromImage(*PreviewSourceImage.GetImage(0, 0, 0), false) };
+			if (FAILED(FallbackInitResult)) {
+				ErrorMessage = "밉맵 생성 및 대체 초기화에 실패했습니다.";
+				return false;
+			}
+		}
+	}
+	else {
+		HRESULT InitializeResult{ SourceForCompression.InitializeFromImage(*PreviewSourceImage.GetImage(0, 0, 0), false) };
+		if (FAILED(InitializeResult)) {
+			ErrorMessage = "원본 이미지 초기화에 실패했습니다.";
+			return false;
+		}
+	}
+	SourceMetadata = SourceForCompression.GetMetadata();
+	const DXGI_FORMAT TargetFormat{ GetDxgiFormat(ConversionOptions.OutputFormat) };
+	const bool IsBlockCompressed{ DirectX::IsCompressed(TargetFormat) };
+	DirectX::ScratchImage DdsReadyImage{};
+	if (IsBlockCompressed) {
+		DirectX::TEX_COMPRESS_FLAGS CompressFlags{ static_cast<DirectX::TEX_COMPRESS_FLAGS>(GetCompressFlags(ConversionOptions)) };
+		HRESULT CompressResult{ DirectX::Compress(SourceForCompression.GetImages(), SourceForCompression.GetImageCount(), SourceMetadata, TargetFormat, CompressFlags, ConversionOptions.AlphaReference, DdsReadyImage) };
+		if (FAILED(CompressResult)) {
+			ErrorMessage = "DDS 압축 변환에 실패했습니다.";
+			return false;
+		}
+	}
+	else {
+		HRESULT CopyResult{ DirectX::Convert(SourceForCompression.GetImages(), SourceForCompression.GetImageCount(), SourceMetadata, TargetFormat, DirectX::TEX_FILTER_DEFAULT, DirectX::TEX_THRESHOLD_DEFAULT, DdsReadyImage) };
+		if (FAILED(CopyResult)) {
+			ErrorMessage = "DDS 비압축 변환에 실패했습니다.";
+			return false;
+		}
+	}
+	DirectX::Blob DdsBlob{};
+	HRESULT SaveResult{ DirectX::SaveToDDSMemory(DdsReadyImage.GetImages(), DdsReadyImage.GetImageCount(), DdsReadyImage.GetMetadata(), DirectX::DDS_FLAGS_NONE, DdsBlob) };
+	if (FAILED(SaveResult)) {
+		ErrorMessage = "메모리 내 DDS 저장에 실패했습니다.";
+		return false;
+	}
+	DirectX::ScratchImage ReloadedDdsImage{};
+	DirectX::TexMetadata ReloadedMetadata{};
+	HRESULT ReloadResult{ DirectX::LoadFromDDSMemory(DdsBlob.GetBufferPointer(), DdsBlob.GetBufferSize(), DirectX::DDS_FLAGS_NONE, &ReloadedMetadata, ReloadedDdsImage) };
+	if (FAILED(ReloadResult)) {
+		ErrorMessage = "변환된 DDS 재로딩에 실패했습니다.";
+		return false;
+	}
+	if (!BuildPreviewScratchImage(ReloadedDdsImage, IsSrgbTarget, ConvertedScratchImage, ErrorMessage)) {
+		return false;
+	}
+	return true;
+}
+
+bool DroppedImageLoader::UploadTextureToDescriptor(const DirectX::ScratchImage& ScratchImage, UINT DescriptorIndex, Microsoft::WRL::ComPtr<ID3D12Resource>& TextureResource, Microsoft::WRL::ComPtr<ID3D12Resource>& UploadResource, ImTextureID& TextureId, UINT& Width, UINT& Height, std::string& ErrorMessage) {
+	const DirectX::Image* ImageData{ ScratchImage.GetImage(0, 0, 0) };
 	if (ImageData == nullptr) {
-		mLastErrorMessage = "변환된 이미지 데이터를 찾지 못했습니다.";
+		ErrorMessage = "업로드할 이미지 데이터를 찾지 못했습니다.";
 		return false;
 	}
-	D3D12_RESOURCE_DESC TextureDesc {};
+	TextureResource.Reset();
+	UploadResource.Reset();
+	D3D12_RESOURCE_DESC TextureDesc{};
 	TextureDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
 	TextureDesc.Alignment = 0;
 	TextureDesc.Width = ImageData->width;
 	TextureDesc.Height = static_cast<UINT>(ImageData->height);
 	TextureDesc.DepthOrArraySize = 1;
 	TextureDesc.MipLevels = 1;
-	TextureDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+	TextureDesc.Format = ImageData->format;
 	TextureDesc.SampleDesc.Count = 1;
 	TextureDesc.SampleDesc.Quality = 0;
 	TextureDesc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
 	TextureDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
-	D3D12_HEAP_PROPERTIES TextureHeapProperties {};
+	D3D12_HEAP_PROPERTIES TextureHeapProperties{};
 	TextureHeapProperties.Type = D3D12_HEAP_TYPE_DEFAULT;
 	TextureHeapProperties.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
 	TextureHeapProperties.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
 	TextureHeapProperties.CreationNodeMask = 1;
 	TextureHeapProperties.VisibleNodeMask = 1;
-	mDevice->CreateCommittedResource(&TextureHeapProperties, D3D12_HEAP_FLAG_NONE, &TextureDesc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&mTextureResource));
-	UINT64 UploadBufferSize { 0 };
-	D3D12_PLACED_SUBRESOURCE_FOOTPRINT Footprint {};
-	UINT NumRows { 0 };
-	UINT64 RowSizeInBytes { 0 };
+	HRESULT TextureCreateResult{ mDevice->CreateCommittedResource(&TextureHeapProperties, D3D12_HEAP_FLAG_NONE, &TextureDesc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&TextureResource)) };
+	if (FAILED(TextureCreateResult)) {
+		ErrorMessage = "텍스처 리소스 생성에 실패했습니다.";
+		return false;
+	}
+	UINT64 UploadBufferSize{ 0 };
+	D3D12_PLACED_SUBRESOURCE_FOOTPRINT Footprint{};
+	UINT NumRows{ 0 };
+	UINT64 RowSizeInBytes{ 0 };
 	mDevice->GetCopyableFootprints(&TextureDesc, 0, 1, 0, &Footprint, &NumRows, &RowSizeInBytes, &UploadBufferSize);
-	D3D12_RESOURCE_DESC UploadDesc {};
+	D3D12_RESOURCE_DESC UploadDesc{};
 	UploadDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
 	UploadDesc.Alignment = 0;
 	UploadDesc.Width = UploadBufferSize;
@@ -251,81 +367,132 @@ bool DroppedImageLoader::LoadAndConvertToDdsInMemory(const std::wstring& FilePat
 	UploadDesc.SampleDesc.Quality = 0;
 	UploadDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
 	UploadDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
-	D3D12_HEAP_PROPERTIES UploadHeapProperties {};
+	D3D12_HEAP_PROPERTIES UploadHeapProperties{};
 	UploadHeapProperties.Type = D3D12_HEAP_TYPE_UPLOAD;
 	UploadHeapProperties.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
 	UploadHeapProperties.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
 	UploadHeapProperties.CreationNodeMask = 1;
 	UploadHeapProperties.VisibleNodeMask = 1;
-	mDevice->CreateCommittedResource(&UploadHeapProperties, D3D12_HEAP_FLAG_NONE, &UploadDesc, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&mUploadResource));
-	std::vector<unsigned char> RawPixels {};
-	RawPixels.resize(ImageData->slicePitch);
-	memcpy(RawPixels.data(), ImageData->pixels, ImageData->slicePitch);
-	void* MappedData { nullptr };
-	D3D12_RANGE ReadRange {};
+	HRESULT UploadCreateResult{ mDevice->CreateCommittedResource(&UploadHeapProperties, D3D12_HEAP_FLAG_NONE, &UploadDesc, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&UploadResource)) };
+	if (FAILED(UploadCreateResult)) {
+		ErrorMessage = "업로드 버퍼 생성에 실패했습니다.";
+		return false;
+	}
+	void* MappedData{ nullptr };
+	D3D12_RANGE ReadRange{};
 	ReadRange.Begin = 0;
 	ReadRange.End = 0;
-	mUploadResource->Map(0, &ReadRange, &MappedData);
-	unsigned char* DestBytes { static_cast<unsigned char*>(MappedData) };
-	for (UINT RowIndex { 0 }; RowIndex < NumRows; ++RowIndex) {
-		const SIZE_T SourceOffset { static_cast<SIZE_T>(RowIndex) * ImageData->rowPitch };
-		const SIZE_T DestinationOffset { static_cast<SIZE_T>(RowIndex) * Footprint.Footprint.RowPitch };
-		memcpy(DestBytes + DestinationOffset, RawPixels.data() + SourceOffset, ImageData->rowPitch);
+	HRESULT MapResult{ UploadResource->Map(0, &ReadRange, &MappedData) };
+	if (FAILED(MapResult)) {
+		ErrorMessage = "업로드 버퍼 맵핑에 실패했습니다.";
+		return false;
 	}
-	mUploadResource->Unmap(0, nullptr);
+	unsigned char* DestinationBytes{ static_cast<unsigned char*>(MappedData) };
+	for (UINT RowIndex{ 0 }; RowIndex < NumRows; ++RowIndex) {
+		const SIZE_T SourceOffset{ static_cast<SIZE_T>(RowIndex) * ImageData->rowPitch };
+		const SIZE_T DestinationOffset{ static_cast<SIZE_T>(RowIndex) * Footprint.Footprint.RowPitch };
+		memcpy(DestinationBytes + DestinationOffset, ImageData->pixels + SourceOffset, ImageData->rowPitch);
+	}
+	UploadResource->Unmap(0, nullptr);
 	mCommandAllocator->Reset();
 	mCommandList->Reset(mCommandAllocator.Get(), nullptr);
-	D3D12_TEXTURE_COPY_LOCATION DestinationLocation {};
-	DestinationLocation.pResource = mTextureResource.Get();
+	D3D12_TEXTURE_COPY_LOCATION DestinationLocation{};
+	DestinationLocation.pResource = TextureResource.Get();
 	DestinationLocation.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
 	DestinationLocation.SubresourceIndex = 0;
-	D3D12_TEXTURE_COPY_LOCATION SourceLocation {};
-	SourceLocation.pResource = mUploadResource.Get();
+	D3D12_TEXTURE_COPY_LOCATION SourceLocation{};
+	SourceLocation.pResource = UploadResource.Get();
 	SourceLocation.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
 	SourceLocation.PlacedFootprint = Footprint;
 	mCommandList->CopyTextureRegion(&DestinationLocation, 0, 0, 0, &SourceLocation, nullptr);
-	D3D12_RESOURCE_BARRIER Barrier {};
+	D3D12_RESOURCE_BARRIER Barrier{};
 	Barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
 	Barrier.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
-	Barrier.Transition.pResource = mTextureResource.Get();
+	Barrier.Transition.pResource = TextureResource.Get();
 	Barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
 	Barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
 	Barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
 	mCommandList->ResourceBarrier(1, &Barrier);
 	mCommandList->Close();
-	ID3D12CommandList* CommandLists[] { mCommandList.Get() };
+	ID3D12CommandList* CommandLists[]{ mCommandList.Get() };
 	mCommandQueue->ExecuteCommandLists(1, CommandLists);
 	WaitForGpu();
-	return true;
-}
-
-bool DroppedImageLoader::CreateTextureFromScratchImage() {
-	if (mTextureResource == nullptr) {
-		return false;
-	}
-	D3D12_SHADER_RESOURCE_VIEW_DESC ShaderResourceViewDesc {};
+	D3D12_SHADER_RESOURCE_VIEW_DESC ShaderResourceViewDesc{};
 	ShaderResourceViewDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-	ShaderResourceViewDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+	ShaderResourceViewDesc.Format = TextureDesc.Format;
 	ShaderResourceViewDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
 	ShaderResourceViewDesc.Texture2D.MostDetailedMip = 0;
 	ShaderResourceViewDesc.Texture2D.MipLevels = 1;
 	ShaderResourceViewDesc.Texture2D.PlaneSlice = 0;
 	ShaderResourceViewDesc.Texture2D.ResourceMinLODClamp = 0.0F;
-	D3D12_CPU_DESCRIPTOR_HANDLE CpuHandle { GetCpuHandle() };
-	mDevice->CreateShaderResourceView(mTextureResource.Get(), &ShaderResourceViewDesc, CpuHandle);
-	D3D12_GPU_DESCRIPTOR_HANDLE GpuHandle { GetGpuHandle() };
-	mTextureId = reinterpret_cast<ImTextureID>(GpuHandle.ptr);
+	D3D12_CPU_DESCRIPTOR_HANDLE CpuHandle{ GetCpuHandle(DescriptorIndex) };
+	mDevice->CreateShaderResourceView(TextureResource.Get(), &ShaderResourceViewDesc, CpuHandle);
+	D3D12_GPU_DESCRIPTOR_HANDLE GpuHandle{ GetGpuHandle(DescriptorIndex) };
+	TextureId = reinterpret_cast<ImTextureID>(GpuHandle.ptr);
+	Width = static_cast<UINT>(ImageData->width);
+	Height = static_cast<UINT>(ImageData->height);
+	ErrorMessage.clear();
 	return true;
 }
 
-D3D12_CPU_DESCRIPTOR_HANDLE DroppedImageLoader::GetCpuHandle() const {
-	D3D12_CPU_DESCRIPTOR_HANDLE CpuHandle { mSrvHeap->GetCPUDescriptorHandleForHeapStart() };
-	CpuHandle.ptr += static_cast<SIZE_T>(mDescriptorIndex) * static_cast<SIZE_T>(mSrvDescriptorSize);
+D3D12_CPU_DESCRIPTOR_HANDLE DroppedImageLoader::GetCpuHandle(UINT DescriptorIndex) const {
+	D3D12_CPU_DESCRIPTOR_HANDLE CpuHandle{ mSrvHeap->GetCPUDescriptorHandleForHeapStart() };
+	CpuHandle.ptr += static_cast<SIZE_T>(DescriptorIndex) * static_cast<SIZE_T>(mSrvDescriptorSize);
 	return CpuHandle;
 }
 
-D3D12_GPU_DESCRIPTOR_HANDLE DroppedImageLoader::GetGpuHandle() const {
-	D3D12_GPU_DESCRIPTOR_HANDLE GpuHandle { mSrvHeap->GetGPUDescriptorHandleForHeapStart() };
-	GpuHandle.ptr += static_cast<UINT64>(mDescriptorIndex) * static_cast<UINT64>(mSrvDescriptorSize);
+D3D12_GPU_DESCRIPTOR_HANDLE DroppedImageLoader::GetGpuHandle(UINT DescriptorIndex) const {
+	D3D12_GPU_DESCRIPTOR_HANDLE GpuHandle{ mSrvHeap->GetGPUDescriptorHandleForHeapStart() };
+	GpuHandle.ptr += static_cast<UINT64>(DescriptorIndex) * static_cast<UINT64>(mSrvDescriptorSize);
 	return GpuHandle;
+}
+
+DXGI_FORMAT DroppedImageLoader::GetDxgiFormat(DdsOutputFormat OutputFormat) const {
+	switch (OutputFormat) {
+	case DdsOutputFormat::Bc1Unorm:
+		return DXGI_FORMAT_BC1_UNORM;
+	case DdsOutputFormat::Bc1UnormSrgb:
+		return DXGI_FORMAT_BC1_UNORM_SRGB;
+	case DdsOutputFormat::Bc2Unorm:
+		return DXGI_FORMAT_BC2_UNORM;
+	case DdsOutputFormat::Bc2UnormSrgb:
+		return DXGI_FORMAT_BC2_UNORM_SRGB;
+	case DdsOutputFormat::Bc3Unorm:
+		return DXGI_FORMAT_BC3_UNORM;
+	case DdsOutputFormat::Bc3UnormSrgb:
+		return DXGI_FORMAT_BC3_UNORM_SRGB;
+	case DdsOutputFormat::Bc4Unorm:
+		return DXGI_FORMAT_BC4_UNORM;
+	case DdsOutputFormat::Bc4Snorm:
+		return DXGI_FORMAT_BC4_SNORM;
+	case DdsOutputFormat::Bc5Unorm:
+		return DXGI_FORMAT_BC5_UNORM;
+	case DdsOutputFormat::Bc5Snorm:
+		return DXGI_FORMAT_BC5_SNORM;
+	case DdsOutputFormat::Bc6hUf16:
+		return DXGI_FORMAT_BC6H_UF16;
+	case DdsOutputFormat::Bc6hSf16:
+		return DXGI_FORMAT_BC6H_SF16;
+	case DdsOutputFormat::Bc7Unorm:
+		return DXGI_FORMAT_BC7_UNORM;
+	case DdsOutputFormat::Bc7UnormSrgb:
+		return DXGI_FORMAT_BC7_UNORM_SRGB;
+	case DdsOutputFormat::Rgba8Unorm:
+		return DXGI_FORMAT_R8G8B8A8_UNORM;
+	case DdsOutputFormat::Rgba8UnormSrgb:
+		return DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+	default:
+		return DXGI_FORMAT_BC7_UNORM;
+	}
+}
+
+DWORD DroppedImageLoader::GetCompressFlags(const DdsConversionOptions& ConversionOptions) const {
+	DWORD CompressFlags{ DirectX::TEX_COMPRESS_DEFAULT };
+	if (ConversionOptions.EnableDithering) {
+		CompressFlags |= DirectX::TEX_COMPRESS_DITHER;
+	}
+	if (ConversionOptions.UseUniformWeighting) {
+		CompressFlags |= DirectX::TEX_COMPRESS_UNIFORM;
+	}
+	return CompressFlags;
 }
