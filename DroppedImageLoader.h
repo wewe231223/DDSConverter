@@ -70,6 +70,7 @@ private:
 	void CreateSynchronizationObjects();
 	void WaitForGpu();
 	bool DecodeFileToScratchImage(const std::wstring& FilePath, DirectX::ScratchImage& ScratchImage, std::string& ErrorMessage) const;
+	bool BuildPreviewScratchImage(const DirectX::ScratchImage& SourceScratchImage, bool IsSrgbTarget, DirectX::ScratchImage& PreviewScratchImage, std::string& ErrorMessage) const;
 	bool BuildConvertedScratchImage(const DdsConversionOptions& ConversionOptions, DirectX::ScratchImage& ConvertedScratchImage, std::string& ErrorMessage) const;
 	bool UploadTextureToDescriptor(const DirectX::ScratchImage& ScratchImage, UINT DescriptorIndex, Microsoft::WRL::ComPtr<ID3D12Resource>& TextureResource, Microsoft::WRL::ComPtr<ID3D12Resource>& UploadResource, ImTextureID& TextureId, UINT& Width, UINT& Height, std::string& ErrorMessage);
 	D3D12_CPU_DESCRIPTOR_HANDLE GetCpuHandle(UINT DescriptorIndex) const;

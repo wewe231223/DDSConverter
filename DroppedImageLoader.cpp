@@ -219,45 +219,75 @@ bool DroppedImageLoader::DecodeFileToScratchImage(const std::wstring& FilePath, 
 	return false;
 }
 
-bool DroppedImageLoader::BuildConvertedScratchImage(const DdsConversionOptions& ConversionOptions, DirectX::ScratchImage& ConvertedScratchImage, std::string& ErrorMessage) const {
-	const DirectX::TexMetadata OriginalMetadata{ mOriginalScratchImage->GetMetadata() };
-	DirectX::ScratchImage LinearImage{};
-	DXGI_FORMAT ConvertTargetFormat{ ConversionOptions.OutputFormat == DdsOutputFormat::Rgba8UnormSrgb ? DXGI_FORMAT_R8G8B8A8_UNORM_SRGB : DXGI_FORMAT_R8G8B8A8_UNORM };
-	const DirectX::Image* OriginalBaseImage{ mOriginalScratchImage->GetImage(0, 0, 0) };
-	if (OriginalBaseImage == nullptr) {
-		ErrorMessage = "원본 이미지 데이터를 찾지 못했습니다.";
+bool DroppedImageLoader::BuildPreviewScratchImage(const DirectX::ScratchImage& SourceScratchImage, bool IsSrgbTarget, DirectX::ScratchImage& PreviewScratchImage, std::string& ErrorMessage) const {
+	const DirectX::TexMetadata SourceMetadata{ SourceScratchImage.GetMetadata() };
+	const DXGI_FORMAT PreviewFormat{ IsSrgbTarget ? DXGI_FORMAT_R8G8B8A8_UNORM_SRGB : DXGI_FORMAT_R8G8B8A8_UNORM };
+	if (SourceScratchImage.GetImageCount() == 0) {
+		ErrorMessage = "미리보기 이미지 데이터가 비어 있습니다.";
 		return false;
 	}
-	HRESULT ConvertResult{ DirectX::Convert(*OriginalBaseImage, ConvertTargetFormat, DirectX::TEX_FILTER_DEFAULT, DirectX::TEX_THRESHOLD_DEFAULT, LinearImage) };
-	if (FAILED(ConvertResult)) {
-		ErrorMessage = "원본 이미지를 변환 가능한 포맷으로 변환하지 못했습니다.";
+	if (SourceMetadata.arraySize > 1 || SourceMetadata.depth > 1 || SourceMetadata.dimension != DirectX::TEX_DIMENSION_TEXTURE2D) {
+		const DirectX::Image* BaseImage{ SourceScratchImage.GetImage(0, 0, 0) };
+		if (BaseImage == nullptr) {
+			ErrorMessage = "미리보기용 기본 이미지를 찾지 못했습니다.";
+			return false;
+		}
+		HRESULT SingleConvertResult{ DirectX::Convert(*BaseImage, PreviewFormat, DirectX::TEX_FILTER_DEFAULT, DirectX::TEX_THRESHOLD_DEFAULT, PreviewScratchImage) };
+		if (FAILED(SingleConvertResult)) {
+			ErrorMessage = "미리보기 포맷 변환에 실패했습니다.";
+			return false;
+		}
+		return true;
+	}
+	HRESULT ConvertResult{ DirectX::Convert(SourceScratchImage.GetImages(), SourceScratchImage.GetImageCount(), SourceMetadata, PreviewFormat, DirectX::TEX_FILTER_DEFAULT, DirectX::TEX_THRESHOLD_DEFAULT, PreviewScratchImage) };
+	if (SUCCEEDED(ConvertResult)) {
+		return true;
+	}
+	const DirectX::Image* BaseImage{ SourceScratchImage.GetImage(0, 0, 0) };
+	if (BaseImage == nullptr) {
+		ErrorMessage = "미리보기용 기본 이미지를 찾지 못했습니다.";
+		return false;
+	}
+	HRESULT FallbackResult{ DirectX::Convert(*BaseImage, PreviewFormat, DirectX::TEX_FILTER_DEFAULT, DirectX::TEX_THRESHOLD_DEFAULT, PreviewScratchImage) };
+	if (FAILED(FallbackResult)) {
+		ErrorMessage = "미리보기 포맷 변환에 실패했습니다.";
+		return false;
+	}
+	return true;
+}
+
+bool DroppedImageLoader::BuildConvertedScratchImage(const DdsConversionOptions& ConversionOptions, DirectX::ScratchImage& ConvertedScratchImage, std::string& ErrorMessage) const {
+	const bool IsSrgbTarget{ ConversionOptions.OutputFormat == DdsOutputFormat::Rgba8UnormSrgb || ConversionOptions.OutputFormat == DdsOutputFormat::Bc1UnormSrgb || ConversionOptions.OutputFormat == DdsOutputFormat::Bc2UnormSrgb || ConversionOptions.OutputFormat == DdsOutputFormat::Bc3UnormSrgb || ConversionOptions.OutputFormat == DdsOutputFormat::Bc7UnormSrgb };
+	DirectX::ScratchImage PreviewSourceImage{};
+	if (!BuildPreviewScratchImage(*mOriginalScratchImage, IsSrgbTarget, PreviewSourceImage, ErrorMessage)) {
 		return false;
 	}
 	DirectX::ScratchImage SourceForCompression{};
-	DirectX::TexMetadata SourceMetadata{ LinearImage.GetMetadata() };
+	DirectX::TexMetadata SourceMetadata{ PreviewSourceImage.GetMetadata() };
 	if (ConversionOptions.GenerateMipMaps) {
-		HRESULT MipResult{ DirectX::GenerateMipMaps(LinearImage.GetImages(), LinearImage.GetImageCount(), SourceMetadata, DirectX::TEX_FILTER_DEFAULT, 0, SourceForCompression) };
+		HRESULT MipResult{ DirectX::GenerateMipMaps(PreviewSourceImage.GetImages(), PreviewSourceImage.GetImageCount(), SourceMetadata, DirectX::TEX_FILTER_DEFAULT, 0, SourceForCompression) };
 		if (FAILED(MipResult)) {
-			ErrorMessage = "밉맵 생성에 실패했습니다.";
-			return false;
+			HRESULT FallbackInitResult{ SourceForCompression.InitializeFromImage(*PreviewSourceImage.GetImage(0, 0, 0), false) };
+			if (FAILED(FallbackInitResult)) {
+				ErrorMessage = "밉맵 생성 및 대체 초기화에 실패했습니다.";
+				return false;
+			}
 		}
-		SourceMetadata = SourceForCompression.GetMetadata();
 	}
 	else {
-		HRESULT InitializeResult{ SourceForCompression.InitializeFromImage(*LinearImage.GetImage(0, 0, 0), false) };
+		HRESULT InitializeResult{ SourceForCompression.InitializeFromImage(*PreviewSourceImage.GetImage(0, 0, 0), false) };
 		if (FAILED(InitializeResult)) {
 			ErrorMessage = "원본 이미지 초기화에 실패했습니다.";
 			return false;
 		}
-		SourceMetadata = SourceForCompression.GetMetadata();
 	}
+	SourceMetadata = SourceForCompression.GetMetadata();
 	const DXGI_FORMAT TargetFormat{ GetDxgiFormat(ConversionOptions.OutputFormat) };
 	const bool IsBlockCompressed{ DirectX::IsCompressed(TargetFormat) };
 	DirectX::ScratchImage DdsReadyImage{};
 	if (IsBlockCompressed) {
 		DirectX::TEX_COMPRESS_FLAGS CompressFlags{ static_cast<DirectX::TEX_COMPRESS_FLAGS>(GetCompressFlags(ConversionOptions)) };
-		DirectX::XMVECTOR CompressionWeight{ DirectX::XMVectorSet(ConversionOptions.CompressionWeightRed, ConversionOptions.CompressionWeightGreen, ConversionOptions.CompressionWeightBlue, 1.0F) };
-		HRESULT CompressResult{ DirectX::Compress(SourceForCompression.GetImages(), SourceForCompression.GetImageCount(), SourceMetadata, TargetFormat, CompressFlags, ConversionOptions.AlphaReference, DdsReadyImage, CompressionWeight) };
+		HRESULT CompressResult{ DirectX::Compress(SourceForCompression.GetImages(), SourceForCompression.GetImageCount(), SourceMetadata, TargetFormat, CompressFlags, ConversionOptions.AlphaReference, DdsReadyImage) };
 		if (FAILED(CompressResult)) {
 			ErrorMessage = "DDS 압축 변환에 실패했습니다.";
 			return false;
@@ -283,18 +313,9 @@ bool DroppedImageLoader::BuildConvertedScratchImage(const DdsConversionOptions& 
 		ErrorMessage = "변환된 DDS 재로딩에 실패했습니다.";
 		return false;
 	}
-	const DirectX::Image* ReloadedBaseImage{ ReloadedDdsImage.GetImage(0, 0, 0) };
-	if (ReloadedBaseImage == nullptr) {
-		ErrorMessage = "변환된 DDS 이미지 데이터를 찾지 못했습니다.";
+	if (!BuildPreviewScratchImage(ReloadedDdsImage, IsSrgbTarget, ConvertedScratchImage, ErrorMessage)) {
 		return false;
 	}
-	DXGI_FORMAT DisplayFormat{ ConversionOptions.OutputFormat == DdsOutputFormat::Rgba8UnormSrgb || ConversionOptions.OutputFormat == DdsOutputFormat::Bc1UnormSrgb || ConversionOptions.OutputFormat == DdsOutputFormat::Bc2UnormSrgb || ConversionOptions.OutputFormat == DdsOutputFormat::Bc3UnormSrgb || ConversionOptions.OutputFormat == DdsOutputFormat::Bc7UnormSrgb ? DXGI_FORMAT_R8G8B8A8_UNORM_SRGB : DXGI_FORMAT_R8G8B8A8_UNORM };
-	HRESULT DisplayConvertResult{ DirectX::Convert(*ReloadedBaseImage, DisplayFormat, DirectX::TEX_FILTER_DEFAULT, DirectX::TEX_THRESHOLD_DEFAULT, ConvertedScratchImage) };
-	if (FAILED(DisplayConvertResult)) {
-		ErrorMessage = "DDS 이미지를 렌더링 가능한 포맷으로 변환하지 못했습니다.";
-		return false;
-	}
-	UNREFERENCED_PARAMETER(OriginalMetadata);
 	return true;
 }
 
