@@ -32,12 +32,19 @@ private:
 	void WaitForGpu();
 	void MoveToNextFrame();
 	void RecordCommandList();
-	void RenderImagePanel();
+	void RenderPanels();
+	void RenderOptionPanel();
+	void RenderSourceImagePanel();
+	void RenderConvertedImagePanel();
+	void DrawImagePreview(ImTextureID TextureId, UINT Width, UINT Height);
 	bool IsInitialized() const;
+	const char* GetOutputFormatName(DdsOutputFormat OutputFormat) const;
+	bool ApplyConversionOptions();
 
-	static constexpr UINT FrameCount { 2 };
-	static constexpr UINT SrvDescriptorCount { 2 };
-	static constexpr UINT ImageSrvDescriptorIndex { 1 };
+	static constexpr UINT FrameCount{ 2 };
+	static constexpr UINT SrvDescriptorCount{ 3 };
+	static constexpr UINT SourceImageSrvDescriptorIndex{ 1 };
+	static constexpr UINT ConvertedImageSrvDescriptorIndex{ 2 };
 
 	HWND mWindowHandle;
 	UINT mFrameIndex;
@@ -48,7 +55,9 @@ private:
 	UINT64 mFenceValue;
 	HANDLE mFenceEvent;
 	bool mInitialized;
+	bool mNeedConversionRefresh;
 	std::string mImageStatusMessage;
+	DdsConversionOptions mConversionOptions;
 	DroppedImageLoader mDroppedImageLoader;
 	Microsoft::WRL::ComPtr<IDXGIFactory4> mFactory;
 	Microsoft::WRL::ComPtr<ID3D12Device> mDevice;
